@@ -1,0 +1,40 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: backstage-mcp-server-prod
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  labels:
+    env: prod
+    app.kubernetes.io/name: backstage-mcp-server
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/GORLEABHILASH/backstage-mcp-server.git
+    targetRevision: main
+    path: deploy/helm/backstage-mcp-server
+    helm:
+      releaseName: bms
+      valueFiles:
+        - values.yaml
+        - values-prod.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: backstage-mcp-prod
+  ## Prod is NOT auto-pruned/healed: image bumps come from human-approved
+  ## promotion PRs and the rollout itself is automatic, but unexpected
+  ## drift requires investigation rather than silent reconciliation.
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m

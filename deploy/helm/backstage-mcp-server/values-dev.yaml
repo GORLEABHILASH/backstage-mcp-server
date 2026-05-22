@@ -1,0 +1,30 @@
+## Dev environment overrides — this file is the GitOps source of truth for
+## the dev cluster. The Tekton pipeline rewrites `image.tag` here on every
+## green build; Argo CD watches this file and rolls the Deployment.
+
+image:
+  repository: ghcr.io/gorleabhilash/backstage-mcp-server
+  # image.tag is rewritten by the Tekton pipeline's update-image-tag task.
+  tag: "dev"
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+config:
+  backstage:
+    url: "http://backstage.backstage.svc.cluster.local:7007"
+    existingSecret: backstage-creds   # optional
+  chroma:
+    url: "http://chroma.chroma.svc.cluster.local:8000"
+    collection: "backstage_techdocs"
+  openai:
+    existingSecret: openai-creds
+  embedModel: "text-embedding-3-small"
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi

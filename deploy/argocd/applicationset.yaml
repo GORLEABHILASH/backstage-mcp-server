@@ -1,0 +1,49 @@
+## Optional: replace application-dev.yaml + application-prod.yaml with a
+## single ApplicationSet that fans out per environment. Pick one approach —
+## using both produces duplicate Applications and Argo CD will flap between
+## them.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: backstage-mcp-server
+  namespace: argocd
+spec:
+  goTemplate: true
+  generators:
+    - list:
+        elements:
+          - env: dev
+            namespace: backstage-mcp-dev
+            autoSync: true
+            autoPrune: true
+          - env: prod
+            namespace: backstage-mcp-prod
+            autoSync: true
+            autoPrune: false
+  template:
+    metadata:
+      name: backstage-mcp-server-{{ .env }}
+      labels:
+        env: "{{ .env }}"
+        app.kubernetes.io/name: backstage-mcp-server
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/GORLEABHILASH/backstage-mcp-server.git
+        targetRevision: main
+        path: deploy/helm/backstage-mcp-server
+        helm:
+          releaseName: bms
+          valueFiles:
+            - values.yaml
+            - "values-{{ .env }}.yaml"
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: "{{ .namespace }}"
+      syncPolicy:
+        automated:
+          prune: "{{ .autoPrune }}"
+          selfHeal: "{{ .autoSync }}"
+        syncOptions:
+          - CreateNamespace=true
+          - ServerSideApply=true

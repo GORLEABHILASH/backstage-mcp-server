@@ -1,0 +1,89 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: update-image-tag
+  labels:
+    app.kubernetes.io/version: "0.1"
+spec:
+  description: >-
+    Update a Helm values file with a new image tag and push a commit to the
+    GitOps branch. This closes the loop between build and deploy: Argo CD,
+    which watches the same branch, will pick up the change and roll the
+    Deployment to the new image.
+
+    The task is intentionally minimal — it edits a single YAML path using
+    `yq` and uses the basic-auth credentials mounted from the `git-credentials`
+    workspace (see Tekton docs on workspaces of type "basic-auth").
+  workspaces:
+    - name: source
+      description: A checked-out git repository with write access.
+    - name: git-credentials
+      description: >-
+        Optional. Provide a Secret of type kubernetes.io/basic-auth via this
+        workspace to authenticate the `git push`. Skip when the cluster's
+        ServiceAccount already has the credentials wired up.
+      optional: true
+  params:
+    - name: values-file
+      description: Path (within the workspace) to the values file to update.
+      type: string
+    - name: tag
+      description: New image tag to write into `.image.tag`.
+      type: string
+    - name: git-user-email
+      description: Author email for the commit.
+      type: string
+      default: tekton-ci@example.com
+    - name: git-user-name
+      description: Author name for the commit.
+      type: string
+      default: tekton-ci
+    - name: branch
+      description: Branch to push the change to.
+      type: string
+      default: main
+    - name: image
+      description: >-
+        Container image with `git` and `yq` installed. The default uses the
+        official mikefarah/yq image which ships with both.
+      type: string
+      default: docker.io/mikefarah/yq:4
+  results:
+    - name: commit-sha
+      description: The SHA of the commit that was pushed (or empty on no-op).
+  steps:
+    - name: bump
+      image: $(params.image)
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/bin/sh
+        set -eu
+
+        VALUES_FILE="$(params.values-file)"
+        NEW_TAG="$(params.tag)"
+
+        echo "==> updating ${VALUES_FILE} image.tag -> ${NEW_TAG}"
+        yq -i ".image.tag = \"${NEW_TAG}\"" "${VALUES_FILE}"
+        echo "--- after ---"
+        yq '.image' "${VALUES_FILE}"
+    - name: commit-and-push
+      image: docker.io/alpine/git:latest
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/bin/sh
+        set -eu
+
+        git config user.email "$(params.git-user-email)"
+        git config user.name "$(params.git-user-name)"
+        git config --global --add safe.directory "$(workspaces.source.path)"
+
+        if git diff --quiet -- "$(params.values-file)"; then
+          echo "no change to commit"
+          printf "" > $(results.commit-sha.path)
+          exit 0
+        fi
+
+        git add "$(params.values-file)"
+        git commit -m "chore: bump image.tag to $(params.tag) [skip ci]"
+        git push origin HEAD:"$(params.branch)"
+        git rev-parse HEAD | tr -d '\n' > $(results.commit-sha.path)

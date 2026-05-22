@@ -1,0 +1,53 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: golang-test
+  labels:
+    app.kubernetes.io/version: "0.1"
+spec:
+  description: >-
+    Run `go vet` and `go test ./...` against a Go module. The workspace is
+    expected to contain a checked-out source tree at $(workspaces.source.path).
+  workspaces:
+    - name: source
+      description: The source code under test.
+  params:
+    - name: package
+      description: Package pattern to test.
+      type: string
+      default: "./..."
+    - name: go-image
+      description: Container image with the Go toolchain.
+      type: string
+      default: docker.io/library/golang:1.25-alpine
+    - name: subdir
+      description: Subdirectory within the workspace to run the tests from.
+      type: string
+      default: ""
+  steps:
+    - name: vet
+      image: $(params.go-image)
+      workingDir: $(workspaces.source.path)/$(params.subdir)
+      env:
+        - name: GOFLAGS
+          value: "-buildvcs=false"
+        - name: GOCACHE
+          value: /workspace/.gocache
+      script: |
+        #!/bin/sh
+        set -eu
+        echo "==> go vet $(params.package)"
+        go vet $(params.package)
+    - name: test
+      image: $(params.go-image)
+      workingDir: $(workspaces.source.path)/$(params.subdir)
+      env:
+        - name: GOFLAGS
+          value: "-buildvcs=false"
+        - name: GOCACHE
+          value: /workspace/.gocache
+      script: |
+        #!/bin/sh
+        set -eu
+        echo "==> go test $(params.package)"
+        go test -count=1 -race $(params.package)

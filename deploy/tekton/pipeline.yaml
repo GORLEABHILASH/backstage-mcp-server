@@ -1,0 +1,142 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: backstage-mcp-build-and-promote
+  labels:
+    app.kubernetes.io/version: "0.1"
+spec:
+  description: >-
+    End-to-end CI/CD pipeline for backstage-mcp-server:
+
+      1. git-clone      : check out the source at the requested revision
+      2. golang-test    : `go vet` and `go test ./...`
+      3. buildah        : build the multi-arch container image and push to
+                          the configured registry, tagged with the short
+                          commit SHA
+      4. update-image-tag : write the new tag into
+                          deploy/helm/backstage-mcp-server/values-dev.yaml
+                          and push a commit. Argo CD, which watches that
+                          file, then rolls the dev environment.
+
+    `git-clone` and `buildah` are well-known Tekton Catalog tasks; install
+    them with `tkn hub install task git-clone` and `tkn hub install task
+    buildah` (see deploy/tekton/README.md).
+  params:
+    - name: repo-url
+      description: HTTPS clone URL of the source repository.
+      type: string
+    - name: revision
+      description: Git revision (branch, tag, or SHA) to build.
+      type: string
+      default: main
+    - name: image
+      description: Fully-qualified image name (without tag).
+      type: string
+    - name: values-file
+      description: Helm values file to update with the new tag.
+      type: string
+      default: deploy/helm/backstage-mcp-server/values-dev.yaml
+    - name: dockerfile
+      description: Path to the Dockerfile relative to the repo root.
+      type: string
+      default: Dockerfile
+  workspaces:
+    - name: source
+      description: Shared workspace for source code across tasks.
+    - name: docker-config
+      description: >-
+        Workspace containing a docker config.json for the target registry
+        (mounted by the buildah task).
+    - name: git-credentials
+      description: >-
+        Workspace containing a basic-auth Secret with push credentials for
+        the GitOps commit.
+
+  results:
+    - name: image-digest
+      description: Digest of the image pushed by buildah.
+      value: $(tasks.build-image.results.IMAGE_DIGEST)
+    - name: short-sha
+      description: Short commit SHA used as the image tag.
+      value: $(tasks.compute-tag.results.short-sha)
+
+  tasks:
+    - name: clone
+      taskRef:
+        name: git-clone
+      workspaces:
+        - name: output
+          workspace: source
+      params:
+        - name: url
+          value: $(params.repo-url)
+        - name: revision
+          value: $(params.revision)
+
+    - name: compute-tag
+      runAfter: [clone]
+      workspaces:
+        - name: source
+          workspace: source
+      params:
+        - name: workspace-path
+          value: $(workspaces.source.path)
+      taskSpec:
+        params:
+          - name: workspace-path
+            type: string
+        workspaces:
+          - name: source
+        results:
+          - name: short-sha
+            description: First 7 chars of the commit SHA.
+        steps:
+          - name: short-sha
+            image: docker.io/alpine/git:latest
+            workingDir: $(workspaces.source.path)
+            script: |
+              #!/bin/sh
+              set -eu
+              git config --global --add safe.directory "$(workspaces.source.path)"
+              git rev-parse --short=7 HEAD | tr -d '\n' > $(results.short-sha.path)
+              echo "short-sha=$(cat $(results.short-sha.path))"
+
+    - name: test
+      runAfter: [clone]
+      taskRef:
+        name: golang-test
+      workspaces:
+        - name: source
+          workspace: source
+
+    - name: build-image
+      runAfter: [test, compute-tag]
+      taskRef:
+        name: buildah
+      workspaces:
+        - name: source
+          workspace: source
+        - name: dockerconfig
+          workspace: docker-config
+      params:
+        - name: IMAGE
+          value: $(params.image):$(tasks.compute-tag.results.short-sha)
+        - name: DOCKERFILE
+          value: $(params.dockerfile)
+        - name: BUILD_EXTRA_ARGS
+          value: "--build-arg=VERSION=$(tasks.compute-tag.results.short-sha)"
+
+    - name: bump-dev-tag
+      runAfter: [build-image]
+      taskRef:
+        name: update-image-tag
+      workspaces:
+        - name: source
+          workspace: source
+        - name: git-credentials
+          workspace: git-credentials
+      params:
+        - name: values-file
+          value: $(params.values-file)
+        - name: tag
+          value: $(tasks.compute-tag.results.short-sha)

@@ -1,0 +1,36 @@
+## Prod environment overrides. The Tekton pipeline does NOT auto-bump prod
+## (compare with values-dev.yaml). Promotion to prod is a manual PR that
+## copies a known-good tag from dev — Argo CD then rolls prod on merge.
+
+image:
+  repository: ghcr.io/gorleabhilash/backstage-mcp-server
+  tag: "0.3.0"             # bumped by hand via promotion PR
+  pullPolicy: IfNotPresent
+
+replicaCount: 3
+
+config:
+  backstage:
+    url: "http://backstage.backstage.svc.cluster.local:7007"
+    existingSecret: backstage-creds
+  chroma:
+    url: "http://chroma.chroma.svc.cluster.local:8000"
+    collection: "backstage_techdocs"
+  openai:
+    existingSecret: openai-creds
+  embedModel: "text-embedding-3-small"
+
+openshift:
+  route:
+    enabled: true
+    tls:
+      enabled: true
+      termination: edge
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi

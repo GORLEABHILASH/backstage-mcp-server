@@ -1,0 +1,33 @@
+## Example PipelineRun — copy and edit the params/workspaces, or use this
+## as the resourceTemplates in a TriggerTemplate (see triggers.yaml).
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: backstage-mcp-build-
+spec:
+  pipelineRef:
+    name: backstage-mcp-build-and-promote
+  serviceAccountName: backstage-mcp-pipeline
+  params:
+    - name: repo-url
+      value: https://github.com/GORLEABHILASH/backstage-mcp-server.git
+    - name: revision
+      value: main
+    - name: image
+      value: ghcr.io/gorleabhilash/backstage-mcp-server
+    - name: values-file
+      value: deploy/helm/backstage-mcp-server/values-dev.yaml
+  workspaces:
+    - name: source
+      volumeClaimTemplate:
+        spec:
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: 1Gi
+    - name: docker-config
+      secret:
+        secretName: registry-creds  # kubectl create secret docker-registry ...
+    - name: git-credentials
+      secret:
+        secretName: git-credentials  # kubernetes.io/basic-auth Secret

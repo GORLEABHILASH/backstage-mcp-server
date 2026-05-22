@@ -1,0 +1,42 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: backstage-mcp-server-dev
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  labels:
+    env: dev
+    app.kubernetes.io/name: backstage-mcp-server
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/GORLEABHILASH/backstage-mcp-server.git
+    targetRevision: main
+    path: deploy/helm/backstage-mcp-server
+    helm:
+      releaseName: bms
+      valueFiles:
+        # Argo CD watches both files. values.yaml is the shared base; the
+        # Tekton pipeline rewrites image.tag in values-dev.yaml on every
+        # green build, which Argo CD then auto-syncs to this Application.
+        - values.yaml
+        - values-dev.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: backstage-mcp-dev
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

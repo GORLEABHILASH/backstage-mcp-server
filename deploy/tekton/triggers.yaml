@@ -1,0 +1,82 @@
+## Webhook-driven Pipeline. Requires Tekton Triggers installed in the
+## cluster (https://tekton.dev/docs/triggers/). Point a GitHub webhook at
+## the EventListener's Route/Service; pushes to `main` will spawn a
+## PipelineRun automatically.
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerBinding
+metadata:
+  name: github-push-binding
+spec:
+  params:
+    - name: repo-url
+      value: $(body.repository.clone_url)
+    - name: revision
+      value: $(body.after)
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata:
+  name: backstage-mcp-build-template
+spec:
+  params:
+    - name: repo-url
+    - name: revision
+  resourcetemplates:
+    - apiVersion: tekton.dev/v1
+      kind: PipelineRun
+      metadata:
+        generateName: backstage-mcp-build-
+      spec:
+        pipelineRef:
+          name: backstage-mcp-build-and-promote
+        serviceAccountName: backstage-mcp-pipeline
+        params:
+          - name: repo-url
+            value: $(tt.params.repo-url)
+          - name: revision
+            value: $(tt.params.revision)
+          - name: image
+            value: ghcr.io/gorleabhilash/backstage-mcp-server
+        workspaces:
+          - name: source
+            volumeClaimTemplate:
+              spec:
+                accessModes: [ReadWriteOnce]
+                resources:
+                  requests:
+                    storage: 1Gi
+          - name: docker-config
+            secret:
+              secretName: registry-creds
+          - name: git-credentials
+            secret:
+              secretName: git-credentials
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: EventListener
+metadata:
+  name: backstage-mcp-github
+spec:
+  serviceAccountName: backstage-mcp-pipeline
+  triggers:
+    - name: github-push
+      interceptors:
+        - ref:
+            name: github
+          params:
+            - name: secretRef
+              value:
+                secretName: github-webhook
+                secretKey: secretToken
+            - name: eventTypes
+              value: ["push"]
+        - ref:
+            name: cel
+          params:
+            - name: filter
+              value: "body.ref == 'refs/heads/main'"
+      bindings:
+        - ref: github-push-binding
+      template:
+        ref: backstage-mcp-build-template

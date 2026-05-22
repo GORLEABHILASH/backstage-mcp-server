@@ -11,7 +11,7 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server, writt
 | 1 | Go MCP server, stdio transport, `search_catalog` + `get_entity` | Done |
 | 2 | RAG over Backstage TechDocs (ChromaDB) — `query_docs` tool + indexer | Done |
 | 3 | HTTP transport, distroless container, Helm chart, OpenShift Route | Done |
-| 4 | Tekton CI pipeline + Argo CD GitOps deploy | Planned |
+| 4 | Tekton CI pipeline + Argo CD GitOps deploy (per-env) | Done |
 | 5 | Upstream contribution to Janus IDP / Backstage Community Plugins | Planned |
 
 ## Architecture
@@ -182,6 +182,55 @@ helm template demo deploy/helm/backstage-mcp-server \
   -f deploy/helm/backstage-mcp-server/values-openshift.yaml   # OpenShift
 ```
 
+## GitOps with Tekton + Argo CD
+
+```
+   git push (main)
+       │
+       ▼
++---------------+   webhook   +-------------------+   image push   +----------+
+|  GitHub repo  | ──────────► |  Tekton           | ─────────────► | Registry |
+|               |             |  Pipeline         |                | (GHCR)   |
++---------------+             |                   |                +----------+
+       ▲                      |  clone → vet/test |
+       │                      |  → buildah        |
+       │  commit              |  → update-image-  |
+       │  values-dev.yaml     |     tag (yq+git)  |
+       └────────────────────  +-------------------+
+                                       │
+                                       │  Argo CD watches
+                                       ▼
+                              +-------------------+
+                              |  Argo CD          |
+                              |  Application      | ──► reconciles Helm chart
+                              |  (auto-sync,      |     into the dev namespace
+                              |   self-heal)      |
+                              +-------------------+
+```
+
+Everything for this flow lives under `deploy/`:
+
+| Path | What it is |
+|---|---|
+| `deploy/tekton/tasks/golang-test.yaml` | Custom Task: `go vet` + `go test` |
+| `deploy/tekton/tasks/update-image-tag.yaml` | Custom Task: `yq` write + `git commit` + push |
+| `deploy/tekton/pipeline.yaml` | Pipeline: clone → test → buildah → bump tag |
+| `deploy/tekton/rbac.yaml` | ServiceAccount + Role for the pipeline |
+| `deploy/tekton/pipelinerun.yaml` | Manual-trigger example |
+| `deploy/tekton/triggers.yaml` | EventListener + TriggerTemplate for GitHub webhooks |
+| `deploy/argocd/application-dev.yaml` | Argo CD `Application` — dev, auto-sync + self-heal |
+| `deploy/argocd/application-prod.yaml` | Argo CD `Application` — prod, manual promotion only |
+| `deploy/argocd/applicationset.yaml` | Optional: single `ApplicationSet` covering both envs |
+| `deploy/helm/.../values-dev.yaml` | The file Tekton rewrites on every green build |
+| `deploy/helm/.../values-prod.yaml` | Hand-edited via promotion PR |
+
+### Promotion model
+
+- **dev** auto-syncs and self-heals — Tekton bumps the tag, Argo CD rolls the pod
+- **prod** never auto-syncs from CI — promotion is a human-approved PR that copies a known-good tag from `values-dev.yaml` into `values-prod.yaml`
+
+See [`deploy/tekton/README.md`](./deploy/tekton/README.md) for the install steps (catalog tasks, required Secrets, webhook setup) and [`deploy/argocd/README.md`](./deploy/argocd/README.md) for the Argo CD bootstrap.
+
 ## Repo layout
 
 ```
@@ -196,7 +245,9 @@ helm template demo deploy/helm/backstage-mcp-server \
 │   └── tools/           # MCP tool definitions and handlers
 ├── deploy/
 │   ├── docker/          # docker-compose for ChromaDB
-│   └── helm/            # Helm chart (Deployment, Service, Route, Ingress)
+│   ├── helm/            # Helm chart + per-env values files
+│   ├── tekton/          # CI pipeline, tasks, RBAC, triggers
+│   └── argocd/          # Application(s) and ApplicationSet
 ├── docs/sample/         # sample documents for the quickstart
 ├── Dockerfile           # multi-stage, distroless, non-root
 ├── Makefile
