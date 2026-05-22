@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "backstage": {
+      "command": "/absolute/path/to/backstage-mcp-server/bin/backstage-mcp-server",
+      "args": [],
+      "env": {
+        "BACKSTAGE_URL": "http://localhost:7007",
+        "BACKSTAGE_TOKEN": ""
+      }
+    }
+  }
+}
