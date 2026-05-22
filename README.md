@@ -1,15 +1,15 @@
 # backstage-mcp-server
 
-An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server, written in **Go**, that exposes the [Backstage](https://backstage.io) Software Catalog to LLM clients such as **Claude Code**, **Cursor**, and **Red Hat Developer Hub** agents.
+An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server, written in **Go**, that exposes the [Backstage](https://backstage.io) Software Catalog and TechDocs to LLM clients such as **Claude Code**, **Cursor**, and **Red Hat Developer Hub** agents.
 
-> Backstage is the open-source platform underlying [Red Hat Developer Hub](https://developers.redhat.com/products/developer-hub/overview). This project lets an LLM answer questions like *"which services use Postgres?"* or *"who owns the payments API?"* by calling typed MCP tools against a live catalog instead of guessing.
+> Backstage is the open-source platform underlying [Red Hat Developer Hub](https://developers.redhat.com/products/developer-hub/overview). This project lets an LLM answer questions like *"which services use Postgres?"* or *"how do I roll back a Payments deploy?"* by calling typed MCP tools — backed by the live catalog and a RAG index over TechDocs — instead of guessing.
 
 ## Status
 
 | Phase | Scope | Status |
 |---|---|---|
-| 1 | Go MCP server, stdio transport, `search_catalog` + `get_entity` tools | In progress |
-| 2 | RAG over Backstage TechDocs (ChromaDB) — `query_docs` tool | Planned |
+| 1 | Go MCP server, stdio transport, `search_catalog` + `get_entity` | Done |
+| 2 | RAG over Backstage TechDocs (ChromaDB) — `query_docs` tool + indexer | Done |
 | 3 | Container image, Helm chart, deploy on OpenShift Local / kind | Planned |
 | 4 | Tekton CI pipeline + Argo CD GitOps deploy | Planned |
 | 5 | Upstream contribution to Janus IDP / Backstage Community Plugins | Planned |
@@ -21,66 +21,127 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server, writt
 |  Claude Code   | <--------------> | backstage-mcp-     | <--------> | Backstage        |
 |  / Cursor / DH |   JSON-RPC 2.0   | server  (Go)       |   REST     | Software Catalog |
 +----------------+                  +--------------------+            +------------------+
+                                            |   ^
+                                            |   | embed query + ANN search
+                                            v   |
+                                       +------------+         +-------------+
+                                       |  ChromaDB  | <-----  |  OpenAI     |
+                                       |  (vector)  |         |  embeddings |
+                                       +------------+         +-------------+
+                                            ^
+                                            | indexer (offline)
                                             |
-                                            +--> tool: search_catalog
-                                            +--> tool: get_entity
-                                            +--> tool: query_docs   (phase 2, RAG)
+                                       +-----------------+
+                                       | TechDocs index  |  (MkDocs search_index.json)
+                                       | or local files  |
+                                       +-----------------+
 ```
 
-The server is a single Go binary. It speaks MCP over stdio (and later HTTP/SSE) and translates each tool call into a Backstage REST request.
+The server is a single Go binary (`backstage-mcp-server`). A companion binary (`backstage-mcp-indexer`) walks documents and writes embeddings into ChromaDB. Both share the same `internal/rag` package.
 
 ## Tools
 
 | Name | Purpose | Inputs |
 |---|---|---|
-| `search_catalog` | Discover entities in the catalog | `kind` (optional), `query` (optional), `limit` (optional) |
+| `search_catalog` | Discover entities in the catalog | `kind?`, `query?`, `limit?` |
 | `get_entity` | Fetch full details for one entity | `ref` (e.g. `component:default/payments`) |
+| `query_docs` | Semantic search over indexed TechDocs | `query`, `k?` |
+
+`query_docs` is registered only when the server is started with `--chroma-url` and `--openai-key` (or the matching env vars). Without them the server still runs and the catalog tools work — the RAG tool simply isn't advertised.
 
 ## Quickstart
 
 ### Prerequisites
 - Go 1.25+
-- A reachable Backstage instance (defaults to `http://localhost:7007`)
+- Docker (for the local ChromaDB)
+- An OpenAI API key, for embeddings
 
-### Build
+### 1. Build
 ```bash
-make build
+make build       # builds bin/backstage-mcp-server and bin/backstage-mcp-indexer
 ```
 
-### Run standalone (for debugging)
+### 2. Start ChromaDB locally
 ```bash
-./bin/backstage-mcp-server --backstage-url=http://localhost:7007
+make chroma-up   # docker compose up -d on Chroma at :8000
+```
+
+### 3. Index the bundled sample docs
+The repo ships a tiny `docs/sample/` tree so you can try RAG end-to-end without
+a real Backstage instance.
+```bash
+export OPENAI_API_KEY=sk-...
+make index-sample
+```
+
+### 4. (Optional) Index real Backstage TechDocs
+```bash
+./bin/backstage-mcp-indexer \
+  --source=techdocs \
+  --backstage-url=http://localhost:7007 \
+  --refs=component:default/payments,component:default/users
+```
+
+### 5. Run the server
+```bash
+./bin/backstage-mcp-server \
+  --backstage-url=http://localhost:7007 \
+  --chroma-url=http://localhost:8000 \
+  --openai-key=$OPENAI_API_KEY
 ```
 The server listens on stdio and waits for an MCP client.
 
-### Use with Claude Code
-1. Build the binary: `make build`
-2. Copy `.mcp.json.example` to `.mcp.json` and update the absolute path
-3. Restart Claude Code — `search_catalog` and `get_entity` will appear in the tool list
+### 6. Wire it into Claude Code
+1. Copy `.mcp.json.example` to `.mcp.json` and fill in the absolute path + your OpenAI key
+2. Restart Claude Code — `search_catalog`, `get_entity`, and `query_docs` will appear in the tool list
 
-### Inspect with the MCP Inspector
+### Poke at it with the MCP Inspector
 ```bash
 make inspect
 ```
-Opens the official MCP Inspector UI in your browser and connects it to the local binary — useful for poking at tools without an LLM.
+Opens the official MCP Inspector UI in your browser and connects to the local binary.
 
 ## Configuration
+
+### Server (`backstage-mcp-server`)
 
 | Flag | Env var | Default | Description |
 |---|---|---|---|
 | `--backstage-url` | `BACKSTAGE_URL` | `http://localhost:7007` | Base URL of the Backstage instance |
 | `--backstage-token` | `BACKSTAGE_TOKEN` | *(empty)* | Bearer token for protected catalogs |
+| `--chroma-url` | `CHROMA_URL` | *(empty — disables RAG)* | ChromaDB base URL |
+| `--chroma-collection` | `CHROMA_COLLECTION` | `backstage_techdocs` | Collection name |
+| `--openai-key` | `OPENAI_API_KEY` | *(empty)* | Required when RAG is enabled |
+| `--embed-model` | `EMBED_MODEL` | `text-embedding-3-small` | OpenAI embedding model |
+
+### Indexer (`backstage-mcp-indexer`)
+
+| Flag | Default | Description |
+|---|---|---|
+| `--source` | `files` | `files` or `techdocs` |
+| `--path` | `./docs` | Directory to walk (files mode) |
+| `--exts` | `.md,.markdown,.txt` | File extensions to include |
+| `--backstage-url` | *(env)* | Backstage URL (techdocs mode) |
+| `--refs` | *(empty)* | Comma-separated entity refs to index (techdocs mode) |
+| `--chroma-url` | `http://localhost:8000` | ChromaDB URL |
+| `--chroma-collection` | `backstage_techdocs` | Target collection |
+| `--openai-key` | *(env)* | Required |
+| `--embed-model` | `text-embedding-3-small` | Embedding model |
 
 ## Repo layout
 
 ```
 .
-├── cmd/server/          # main.go — binary entry point
+├── cmd/
+│   ├── server/          # MCP server binary
+│   └── indexer/         # one-shot document ingester
 ├── internal/
-│   ├── backstage/       # thin Software Catalog REST client
+│   ├── backstage/       # Software Catalog REST client
+│   ├── techdocs/        # TechDocs search_index.json fetcher
+│   ├── rag/             # chunker, embeddings, Chroma client, Store
 │   └── tools/           # MCP tool definitions and handlers
-├── deploy/              # (phase 3+) Helm chart, OpenShift manifests
-├── docs/                # (phase 2+) ingestion + RAG notes
+├── deploy/docker/       # docker-compose for ChromaDB
+├── docs/sample/         # sample documents for the quickstart
 ├── Makefile
 └── .mcp.json.example
 ```
@@ -96,7 +157,7 @@ make test   # go test ./...
 
 ## Why this exists
 
-Red Hat Developer Hub builds on Backstage and is investing in AI assistants and MCP servers for the platform. Most existing MCP servers target generic data sources (filesystem, git, databases). This project closes the gap between an LLM and a developer platform's catalog so an engineer can ask natural-language questions about their own infrastructure and get grounded answers.
+Red Hat Developer Hub builds on Backstage and is investing in AI assistants and MCP servers for the platform. Most existing MCP servers target generic data sources (filesystem, git, databases). This project closes the gap between an LLM and a developer platform: the catalog tells the LLM *what exists*, and the TechDocs RAG layer tells it *how it works* — so an engineer can ask natural-language questions about their own infrastructure and get grounded, source-cited answers.
 
 ## License
 

@@ -11,13 +11,28 @@ import (
 	"fmt"
 
 	"github.com/GORLEABHILASH/backstage-mcp-server/internal/backstage"
+	"github.com/GORLEABHILASH/backstage-mcp-server/internal/rag"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// Register wires every tool in this package onto the given server.
-func Register(server *mcp.Server, client *backstage.Client) {
-	registerSearchCatalog(server, client)
-	registerGetEntity(server, client)
+// Deps bundles the optional collaborators the tools depend on. The RAG store
+// is nil-safe: when nil, the query_docs tool is simply not registered.
+type Deps struct {
+	Backstage *backstage.Client
+	RAG       *rag.Store
+}
+
+// Register wires every available tool onto the given server. Tools whose
+// dependencies are missing are skipped silently so the server still runs
+// with a partial feature set (useful for local dev without ChromaDB).
+func Register(server *mcp.Server, deps Deps) {
+	if deps.Backstage != nil {
+		registerSearchCatalog(server, deps.Backstage)
+		registerGetEntity(server, deps.Backstage)
+	}
+	if deps.RAG != nil {
+		registerQueryDocs(server, deps.RAG)
+	}
 }
 
 // --- search_catalog -----------------------------------------------------
@@ -64,6 +79,29 @@ func registerGetEntity(server *mcp.Server, client *backstage.Client) {
 			return errorResult(err), nil, nil
 		}
 		return jsonResult(entity), nil, nil
+	})
+}
+
+// --- query_docs ---------------------------------------------------------
+
+type queryDocsArgs struct {
+	Query string `json:"query" jsonschema:"natural language question to ask against the indexed TechDocs"`
+	K     int    `json:"k,omitempty" jsonschema:"number of chunks to retrieve (default 5)"`
+}
+
+func registerQueryDocs(server *mcp.Server, store *rag.Store) {
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "query_docs",
+		Description: "Semantic search over indexed Backstage TechDocs. Returns the top-k chunks most relevant to the query, with source attribution. Use this when search_catalog metadata is not enough and you need actual documentation content.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args queryDocsArgs) (*mcp.CallToolResult, any, error) {
+		if args.Query == "" {
+			return errorResult(fmt.Errorf("query is required")), nil, nil
+		}
+		hits, err := store.Query(ctx, args.Query, args.K)
+		if err != nil {
+			return errorResult(err), nil, nil
+		}
+		return jsonResult(hits), nil, nil
 	})
 }
 
