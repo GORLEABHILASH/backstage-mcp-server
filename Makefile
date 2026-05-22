@@ -1,7 +1,11 @@
 SERVER  := backstage-mcp-server
 INDEXER := backstage-mcp-indexer
+IMAGE   ?= backstage-mcp-server
+TAG     ?= dev
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: build build-server build-indexer test run run-indexer tidy fmt vet clean inspect chroma-up chroma-down index-sample
+.PHONY: build build-server build-indexer test run run-indexer tidy fmt vet clean inspect \
+        chroma-up chroma-down index-sample image image-load helm-lint helm-template
 
 build: build-server build-indexer
 
@@ -46,3 +50,18 @@ chroma-down:
 ## Index the bundled sample docs (requires OPENAI_API_KEY and a running Chroma).
 index-sample: build-indexer
 	./bin/$(INDEXER) --source=files --path=./docs/sample
+
+## Build the container image (defaults: backstage-mcp-server:dev).
+image:
+	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE):$(TAG) .
+
+## Load the image into a local kind cluster.
+image-load: image
+	kind load docker-image $(IMAGE):$(TAG)
+
+## Lint and render the Helm chart.
+helm-lint:
+	helm lint deploy/helm/backstage-mcp-server
+
+helm-template:
+	helm template demo deploy/helm/backstage-mcp-server

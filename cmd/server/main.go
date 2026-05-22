@@ -1,19 +1,25 @@
 // Command backstage-mcp-server runs an MCP server that exposes the Backstage
-// Software Catalog as MCP tools, consumable by LLM clients such as Claude
-// Code or Cursor.
+// Software Catalog and TechDocs RAG as MCP tools, consumable by LLM clients
+// such as Claude Code, Cursor, and Red Hat Developer Hub.
 //
-// Transport: stdio. The server reads MCP requests from stdin and writes
-// responses to stdout; logs go to stderr so they do not corrupt the
-// protocol stream.
+// Two transports are supported:
+//
+//   - stdio: default; the server reads MCP requests from stdin and writes
+//     responses to stdout. Use this for local Claude Code / Cursor integration.
+//   - http: serves the Streamable HTTP transport plus /healthz on a TCP
+//     listener. Use this when running inside Kubernetes / OpenShift.
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/GORLEABHILASH/backstage-mcp-server/internal/backstage"
 	"github.com/GORLEABHILASH/backstage-mcp-server/internal/rag"
@@ -21,18 +27,25 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const (
-	serverName    = "backstage-mcp-server"
-	serverVersion = "0.2.0"
-)
+const serverName = "backstage-mcp-server"
+
+// serverVersion is overridable at build time via
+// `-ldflags "-X main.serverVersion=<version>"`.
+var serverVersion = "0.3.0"
 
 func main() {
+	transport := flag.String("transport", envOr("MCP_TRANSPORT", "stdio"),
+		"Transport: stdio | http (env: MCP_TRANSPORT)")
+	httpAddr := flag.String("http-addr", envOr("HTTP_ADDR", ":8080"),
+		"Address to listen on when --transport=http (env: HTTP_ADDR)")
+	httpPath := flag.String("http-path", envOr("HTTP_PATH", "/mcp"),
+		"URL path for the MCP endpoint when --transport=http (env: HTTP_PATH)")
+
 	backstageURL := flag.String("backstage-url", envOr("BACKSTAGE_URL", "http://localhost:7007"),
 		"Base URL of the Backstage instance (env: BACKSTAGE_URL)")
 	backstageToken := flag.String("backstage-token", os.Getenv("BACKSTAGE_TOKEN"),
 		"Optional bearer token for Backstage (env: BACKSTAGE_TOKEN)")
 
-	// RAG is opt-in: provide a Chroma URL + OpenAI key to enable query_docs.
 	chromaURL := flag.String("chroma-url", os.Getenv("CHROMA_URL"),
 		"Base URL of ChromaDB (env: CHROMA_URL). Leave empty to disable query_docs.")
 	chromaCollection := flag.String("chroma-collection", envOr("CHROMA_COLLECTION", "backstage_techdocs"),
@@ -44,9 +57,10 @@ func main() {
 
 	flag.Parse()
 
-	// stderr logger — stdout is reserved for MCP protocol traffic.
+	// HTTP mode logs to stderr (stdout is fine too, but we keep them consistent).
+	// stdio mode MUST log to stderr — stdout is reserved for the protocol stream.
 	logger := log.New(os.Stderr, "[backstage-mcp] ", log.LstdFlags|log.Lmsgprefix)
-	logger.Printf("starting %s v%s (backstage=%s)", serverName, serverVersion, *backstageURL)
+	logger.Printf("starting %s v%s (transport=%s backstage=%s)", serverName, serverVersion, *transport, *backstageURL)
 
 	bsClient, err := backstage.New(backstage.Config{
 		BaseURL: *backstageURL,
@@ -69,19 +83,71 @@ func main() {
 		logger.Printf("RAG disabled — query_docs tool will not be registered (set --chroma-url to enable)")
 	}
 
-	server := mcp.NewServer(&mcp.Implementation{
-		Name:    serverName,
-		Version: serverVersion,
-	}, nil)
-
-	tools.Register(server, deps)
+	newServer := func() *mcp.Server {
+		s := mcp.NewServer(&mcp.Implementation{
+			Name:    serverName,
+			Version: serverVersion,
+		}, nil)
+		tools.Register(s, deps)
+		return s
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {
-		logger.Fatalf("server exited: %v", err)
+	switch *transport {
+	case "stdio":
+		s := newServer()
+		if err := s.Run(ctx, &mcp.StdioTransport{}); err != nil {
+			logger.Fatalf("server exited: %v", err)
+		}
+	case "http":
+		if err := runHTTP(ctx, logger, *httpAddr, *httpPath, newServer); err != nil {
+			logger.Fatalf("http server exited: %v", err)
+		}
+	default:
+		logger.Fatalf("unknown --transport %q (want stdio|http)", *transport)
 	}
+}
+
+// runHTTP serves the MCP Streamable HTTP handler plus /healthz on the given
+// address. It returns when ctx is cancelled or the listener fails.
+func runHTTP(ctx context.Context, logger *log.Logger, addr, path string, newServer func() *mcp.Server) error {
+	mcpHandler := mcp.NewStreamableHTTPHandler(func(_ *http.Request) *mcp.Server {
+		// One server per request: stateless, safe for replicas behind a Service.
+		return newServer()
+	}, nil)
+
+	mux := http.NewServeMux()
+	mux.Handle(path, mcpHandler)
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ready"))
+	})
+
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	go func() {
+		<-ctx.Done()
+		logger.Printf("shutting down http server")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+
+	logger.Printf("listening on %s (mcp=%s healthz=/healthz)", addr, path)
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
 }
 
 func buildRAGStore(chromaURL, collection, openaiKey, model string) (*rag.Store, error) {

@@ -1,0 +1,44 @@
+## Example overrides for an OpenShift deployment with RAG enabled.
+## Usage:
+##   helm install bms deploy/helm/backstage-mcp-server \
+##     -f deploy/helm/backstage-mcp-server/values-openshift.yaml \
+##     --set config.openai.existingSecret=openai-creds
+
+openshift:
+  route:
+    enabled: true
+    tls:
+      enabled: true
+      termination: edge
+
+config:
+  backstage:
+    url: "http://backstage.backstage.svc.cluster.local:7007"
+  chroma:
+    url: "http://chroma.chroma.svc.cluster.local:8000"
+    collection: "backstage_techdocs"
+  embedModel: "text-embedding-3-small"
+
+## OpenShift restricted-v2 SCC: distroless already runs as UID 65532, which
+## may be outside the namespace's allowed UID range. If so, omit
+## runAsUser and let OpenShift assign one. The base image's nonroot user
+## will still apply.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi

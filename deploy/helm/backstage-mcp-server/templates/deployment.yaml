@@ -1,0 +1,97 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "backstage-mcp-server.fullname" . }}
+  labels:
+    {{- include "backstage-mcp-server.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "backstage-mcp-server.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "backstage-mcp-server.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: server
+          image: {{ include "backstage-mcp-server.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: MCP_TRANSPORT
+              value: {{ .Values.config.transport | quote }}
+            - name: HTTP_ADDR
+              value: {{ .Values.config.httpAddr | quote }}
+            - name: HTTP_PATH
+              value: {{ .Values.config.httpPath | quote }}
+            - name: BACKSTAGE_URL
+              value: {{ .Values.config.backstage.url | quote }}
+            {{- $bsSecret := default (printf "%s" (include "backstage-mcp-server.fullname" .)) .Values.config.backstage.existingSecret }}
+            {{- if or .Values.config.backstage.token .Values.config.backstage.existingSecret }}
+            - name: BACKSTAGE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $bsSecret }}
+                  key: backstage-token
+                  optional: true
+            {{- end }}
+            {{- if .Values.config.chroma.url }}
+            - name: CHROMA_URL
+              value: {{ .Values.config.chroma.url | quote }}
+            - name: CHROMA_COLLECTION
+              value: {{ .Values.config.chroma.collection | quote }}
+            - name: EMBED_MODEL
+              value: {{ .Values.config.embedModel | quote }}
+            {{- $oaSecret := default (printf "%s" (include "backstage-mcp-server.fullname" .)) .Values.config.openai.existingSecret }}
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $oaSecret }}
+                  key: openai-api-key
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

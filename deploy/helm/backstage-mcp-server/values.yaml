@@ -1,0 +1,100 @@
+## Default values for backstage-mcp-server.
+## Override with `helm install -f my-values.yaml` or `--set key=value`.
+
+image:
+  repository: ghcr.io/gorleabhilash/backstage-mcp-server
+  tag: ""              # defaults to .Chart.AppVersion when empty
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+replicaCount: 1
+
+## Server configuration. These map directly to env vars / flags on the
+## binary; see README for the full list.
+config:
+  transport: http
+  httpAddr: ":8080"
+  httpPath: "/mcp"
+
+  backstage:
+    url: "http://backstage.backstage.svc.cluster.local:7007"
+    ## If your Backstage requires a bearer token, store it in a Secret and
+    ## reference it via existingSecret below (preferred to inline `token`).
+    token: ""
+    existingSecret: ""           # name of Secret containing key `backstage-token`
+
+  ## RAG is opt-in. Leave chroma.url empty to skip mounting the OpenAI Secret
+  ## and to disable the query_docs tool.
+  chroma:
+    url: ""                      # e.g. http://chroma.chroma.svc:8000
+    collection: "backstage_techdocs"
+
+  openai:
+    ## Either set `apiKey` inline (only for dev) or point at an existing
+    ## Secret with key `openai-api-key`.
+    apiKey: ""
+    existingSecret: ""
+
+  embedModel: "text-embedding-3-small"
+
+service:
+  type: ClusterIP
+  port: 8080
+
+## Set ingress.enabled=true for plain Kubernetes; on OpenShift prefer
+## openshift.route.enabled (see below) which creates a native Route.
+ingress:
+  enabled: false
+  className: ""
+  host: ""
+  tls: []
+  annotations: {}
+
+## OpenShift-specific knobs. The Route is rendered when this is enabled and
+## helm sees the route.openshift.io/v1 API on the cluster.
+openshift:
+  route:
+    enabled: false
+    host: ""                     # leave empty to let OpenShift assign
+    tls:
+      enabled: true
+      termination: edge          # edge | passthrough | reencrypt
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+## Probes hit the /healthz and /readyz endpoints exposed by the server.
+probes:
+  liveness:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+  readiness:
+    initialDelaySeconds: 2
+    periodSeconds: 5
+
+## Pod security: distroless image already runs as UID 65532. Keep these
+## permissive enough for both plain Kubernetes and OpenShift restricted-v2.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+podAnnotations: {}
+podLabels: {}

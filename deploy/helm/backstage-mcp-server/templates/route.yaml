@@ -1,0 +1,29 @@
+{{/*
+OpenShift Route. Rendered only when:
+- .Values.openshift.route.enabled is true, AND
+- the cluster exposes route.openshift.io/v1 (i.e. we are on OpenShift)
+*/}}
+{{- if and .Values.openshift.route.enabled (.Capabilities.APIVersions.Has "route.openshift.io/v1") -}}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ include "backstage-mcp-server.fullname" . }}
+  labels:
+    {{- include "backstage-mcp-server.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.openshift.route.host }}
+  host: {{ .Values.openshift.route.host }}
+  {{- end }}
+  to:
+    kind: Service
+    name: {{ include "backstage-mcp-server.fullname" . }}
+    weight: 100
+  port:
+    targetPort: http
+  {{- if .Values.openshift.route.tls.enabled }}
+  tls:
+    termination: {{ .Values.openshift.route.tls.termination }}
+    insecureEdgeTerminationPolicy: Redirect
+  {{- end }}
+  wildcardPolicy: None
+{{- end -}}

@@ -1,0 +1,20 @@
+{{ include "backstage-mcp-server.fullname" . }} is now installed.
+
+To reach the MCP endpoint:
+
+  kubectl --namespace {{ .Release.Namespace }} port-forward \
+    svc/{{ include "backstage-mcp-server.fullname" . }} 8080:{{ .Values.service.port }}
+
+  # then point your MCP client at http://localhost:8080{{ .Values.config.httpPath }}
+
+{{- if and .Values.openshift.route.enabled (.Capabilities.APIVersions.Has "route.openshift.io/v1") }}
+
+OpenShift Route:
+
+  oc get route {{ include "backstage-mcp-server.fullname" . }} -n {{ .Release.Namespace }} -o jsonpath='{.spec.host}'
+{{- end }}
+
+Configuration summary:
+  transport       = {{ .Values.config.transport }}
+  backstage url   = {{ .Values.config.backstage.url }}
+  RAG enabled     = {{ if .Values.config.chroma.url }}yes (chroma={{ .Values.config.chroma.url }}){{ else }}no{{ end }}

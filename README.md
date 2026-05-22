@@ -10,7 +10,7 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server, writt
 |---|---|---|
 | 1 | Go MCP server, stdio transport, `search_catalog` + `get_entity` | Done |
 | 2 | RAG over Backstage TechDocs (ChromaDB) — `query_docs` tool + indexer | Done |
-| 3 | Container image, Helm chart, deploy on OpenShift Local / kind | Planned |
+| 3 | HTTP transport, distroless container, Helm chart, OpenShift Route | Done |
 | 4 | Tekton CI pipeline + Argo CD GitOps deploy | Planned |
 | 5 | Upstream contribution to Janus IDP / Backstage Community Plugins | Planned |
 
@@ -48,6 +48,15 @@ The server is a single Go binary (`backstage-mcp-server`). A companion binary (`
 | `query_docs` | Semantic search over indexed TechDocs | `query`, `k?` |
 
 `query_docs` is registered only when the server is started with `--chroma-url` and `--openai-key` (or the matching env vars). Without them the server still runs and the catalog tools work — the RAG tool simply isn't advertised.
+
+## Transports
+
+| Transport | When to use | How to enable |
+|---|---|---|
+| `stdio` *(default)* | Local Claude Code / Cursor integration | run the binary; client launches it |
+| `http` (Streamable HTTP) | Kubernetes / OpenShift / shared remote | `--transport=http --http-addr=:8080` |
+
+In HTTP mode the server also exposes `/healthz` and `/readyz` for K8s probes; the MCP endpoint defaults to `/mcp`.
 
 ## Quickstart
 
@@ -128,6 +137,51 @@ Opens the official MCP Inspector UI in your browser and connects to the local bi
 | `--openai-key` | *(env)* | Required |
 | `--embed-model` | `text-embedding-3-small` | Embedding model |
 
+## Container image
+
+A multi-stage Dockerfile produces a ~25 MB distroless image that runs as a non-root user (UID 65532), compatible with OpenShift's `restricted-v2` SCC.
+
+```bash
+docker build -t backstage-mcp-server:dev --build-arg VERSION=$(git describe --tags --always) .
+
+# smoke-test in HTTP mode
+docker run --rm -p 8080:8080 backstage-mcp-server:dev
+curl -s http://localhost:8080/healthz
+```
+
+## Deploy with Helm
+
+A Helm chart lives in `deploy/helm/backstage-mcp-server/`. It renders a Deployment, Service, optional Ingress, and — when the cluster exposes `route.openshift.io/v1` — an OpenShift Route.
+
+### Plain Kubernetes (kind / minikube)
+```bash
+helm install bms deploy/helm/backstage-mcp-server \
+  --set image.tag=dev \
+  --set config.backstage.url=http://backstage.backstage:7007 \
+  --set config.chroma.url=http://chroma.chroma:8000 \
+  --set config.openai.existingSecret=openai-creds
+```
+
+### OpenShift / Red Hat Developer Hub
+```bash
+oc new-project mcp
+helm install bms deploy/helm/backstage-mcp-server \
+  -f deploy/helm/backstage-mcp-server/values-openshift.yaml \
+  --set config.openai.existingSecret=openai-creds
+oc get route bms-backstage-mcp-server -o jsonpath='{.spec.host}'
+```
+
+The Route terminates TLS at the edge; the pod itself listens on plain HTTP on `:8080`. Probes hit `/healthz` and `/readyz`. Secrets (Backstage token, OpenAI key) are sourced from a Kubernetes Secret you control — pass `existingSecret` rather than the inline `apiKey` for anything beyond dev.
+
+### Verify the chart locally
+```bash
+helm lint deploy/helm/backstage-mcp-server
+helm template demo deploy/helm/backstage-mcp-server          # plain k8s
+helm template demo deploy/helm/backstage-mcp-server \
+  --api-versions=route.openshift.io/v1 \
+  -f deploy/helm/backstage-mcp-server/values-openshift.yaml   # OpenShift
+```
+
 ## Repo layout
 
 ```
@@ -140,8 +194,11 @@ Opens the official MCP Inspector UI in your browser and connects to the local bi
 │   ├── techdocs/        # TechDocs search_index.json fetcher
 │   ├── rag/             # chunker, embeddings, Chroma client, Store
 │   └── tools/           # MCP tool definitions and handlers
-├── deploy/docker/       # docker-compose for ChromaDB
+├── deploy/
+│   ├── docker/          # docker-compose for ChromaDB
+│   └── helm/            # Helm chart (Deployment, Service, Route, Ingress)
 ├── docs/sample/         # sample documents for the quickstart
+├── Dockerfile           # multi-stage, distroless, non-root
 ├── Makefile
 └── .mcp.json.example
 ```

@@ -1,0 +1,13 @@
+bin/
+.git/
+.github/
+.idea/
+.vscode/
+*.md
+!README.md
+docs/sample/
+deploy/
+.mcp.json
+.mcp.json.example
+LICENSE
+Makefile
